@@ -1,0 +1,14 @@
+.DS_Store
+.vscode/
+__pycache__/
+build/
+dist/
+*.spec
+*.log
+*.pdf
+# personal data (the app saves this in your user folder, but just in case)
+completed_courses.json
+wanted_courses.json
+course_notes.json
+flowchart.dot
+flowchart.svg

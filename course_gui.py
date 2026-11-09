@@ -856,12 +856,11 @@ class CoursePostRequisitesApp(tk.Tk):
 
     def configure_unlocked_result_tags(self):
         text = self.unlocked_results
-        text.tag_configure("unlocked_code", font=ui_font(13, "bold"), foreground=UVIC_DARK_BLUE, spacing1=14)
-        text.tag_configure("unlocked_title", font=ui_font(12), foreground=UVIC_BLUE)
-        text.tag_configure("unlocked_line", lmargin1=16, lmargin2=16, spacing1=6)
-        text.tag_configure("unlocked_subhead", font=ui_font(11, "bold"), lmargin1=16, lmargin2=16, spacing1=8)
-        text.tag_configure("unlocked_req", lmargin1=32, lmargin2=44)
-        text.tag_configure("unlocked_item", lmargin1=52, lmargin2=64)
+        text.tag_configure("unlocked_code", font=ui_font(11, "bold"), foreground=UVIC_DARK_BLUE, spacing1=12)
+        text.tag_configure("unlocked_title", foreground=UVIC_BLUE)
+        text.tag_configure("unlocked_line", lmargin1=16, lmargin2=16)
+        text.tag_configure("unlocked_item", lmargin1=28, lmargin2=40)
+        text.tag_configure("unlocked_note", lmargin1=16, lmargin2=16, foreground=UVIC_BLUE)
 
     def get_unlocked_courses(self, target_course):
         courses = self.course_graph.get("courses", {})
@@ -885,58 +884,176 @@ class CoursePostRequisitesApp(tk.Tk):
 
         return unlocked
 
-    def requirement_timing(self, requirement):
+    UNLOCKED_MAX_LINES = 6
+    UNLOCKED_MAX_LISTED_OPTIONS = 4
+
+    def requirement_timing_note(self, requirement):
         if requirement.get("category") == REQUIREMENT_COREQUISITE:
-            return "must be taken at the same time (corequisite)"
+            return " (must be taken in the same term)"
 
         if requirement.get("concurrent_allowed"):
-            return "can be completed beforehand or taken at the same time (pre- or corequisite)"
+            return " (can be taken at the same time)"
 
-        return "must be completed beforehand (prerequisite)"
+        return ""
+
+    @staticmethod
+    def join_courses(courses, word):
+        courses = list(courses)
+
+        if len(courses) <= 1:
+            return "".join(courses)
+
+        return f"{', '.join(courses[:-1])} {word} {courses[-1]}"
+
+    @staticmethod
+    def clean_requirement_note(note):
+        text = note.strip()
+        alternative = False
+
+        while text.lower().startswith("alternatively:"):
+            text = text[len("alternatively:"):].strip()
+            alternative = True
+
+        if text.lower().startswith("or "):
+            text = text[3:].strip()
+            alternative = True
+
+        text = text.rstrip(". ").strip()
+
+        if not text:
+            return ""
+
+        if alternative:
+            return f"Alternative way to qualify: {text}"
+
+        return text[0].upper() + text[1:]
+
+    def unlocked_role_line(self, target_course, matching_groups):
+        required = [group for group in matching_groups if len(group["courses"]) == 1]
+        requirement = required[0] if required else matching_groups[0]
+        timing = self.requirement_timing_note(requirement)
+
+        if required:
+            return f"{target_course} is required{timing}."
+
+        if len(matching_groups) > 1:
+            return f"{target_course} is part of one of the accepted combinations{timing}."
+
+        kind = {
+            REQUIREMENT_PREREQUISITE: "prerequisite ",
+            REQUIREMENT_COREQUISITE: "corequisite ",
+        }.get(requirement.get("category"), "")
+        return f"{target_course} is one of the accepted {kind}options{timing}."
+
+    def summarize_unlocked_course(self, course, matching_groups, other_required_groups, target_course):
+        """Short, readable summary of one course for the Unlocked page.
+
+        Returns role (how the searched course counts), lines (other requirements), covered
+        (which other groups each line stands for) and summarized (True when detail was left out,
+        so the page points to Prereqs). Presentation only; nothing here changes requirement logic.
+        """
+        details = self.get_course_details(course) or {}
+        summarized = bool(details.get("needs_review"))
+        lines = []
+        covered = []
+
+        # Mandatory single courses, grouped by when they can be taken.
+        mandatory = {}
+
+        for index, requirement in enumerate(other_required_groups):
+            if len(requirement["courses"]) == 1:
+                timing = self.requirement_timing_note(requirement)
+                mandatory.setdefault(timing, []).append((index, requirement["courses"][0]))
+
+        for timing, items in mandatory.items():
+            lines.append(self.join_courses([code for _index, code in items], "and") + timing)
+            covered.append([index for index, _code in items])
+
+        # Alternative groups. Groups that share courses are overlapping combinations of one
+        # nested rule, so they are described in general terms instead of listed.
+        alternatives = [
+            index for index, requirement in enumerate(other_required_groups)
+            if len(requirement["courses"]) > 1
+        ]
+        clusters = []
+
+        for index in alternatives:
+            options = set(other_required_groups[index]["courses"])
+            joined = [cluster for cluster in clusters if options & cluster["courses"]]
+
+            for cluster in joined:
+                clusters.remove(cluster)
+
+            clusters.append({
+                "indexes": sorted([index] + [i for cluster in joined for i in cluster["indexes"]]),
+                "courses": options.union(*[cluster["courses"] for cluster in joined]),
+            })
+
+        clusters.sort(key=lambda cluster: cluster["indexes"][0])
+
+        for cluster in clusters:
+            first = other_required_groups[cluster["indexes"][0]]
+            timing = self.requirement_timing_note(first)
+
+            if len(cluster["indexes"]) == 1:
+                options = first["courses"]
+
+                if len(options) <= self.UNLOCKED_MAX_LISTED_OPTIONS:
+                    lines.append(f"One of {self.join_courses(options, 'or')}{timing}")
+                else:
+                    lines.append(f"One of {', '.join(options[:3])} or {len(options) - 3} other courses{timing}")
+                    summarized = True
+            else:
+                subjects = {}
+                for code in sorted(cluster["courses"]):
+                    subject = code.split(" ")[0]
+                    subjects[subject] = subjects.get(subject, 0) + 1
+                top = sorted(subjects, key=lambda subject: -subjects[subject])[:2]
+                lines.append(f"{'/'.join(top)} requirement — multiple accepted combinations{timing}")
+                summarized = True
+
+            covered.append(cluster["indexes"])
+
+        notes = []
+        for note in details.get("requirement_notes") or []:
+            cleaned = self.clean_requirement_note(note)
+            if cleaned and cleaned not in notes:
+                notes.append(cleaned)
+
+        lines.extend(notes)
+
+        if len(lines) > self.UNLOCKED_MAX_LINES:
+            hidden = len(lines) - (self.UNLOCKED_MAX_LINES - 1)
+            lines = lines[: self.UNLOCKED_MAX_LINES - 1] + [f"{hidden} more requirements"]
+            summarized = True
+
+        return {
+            "role": self.unlocked_role_line(target_course, matching_groups),
+            "lines": lines,
+            "covered": covered,
+            "summarized": summarized,
+        }
 
     def build_unlocked_course_segments(self, course, matching_groups, other_required_groups, target_course):
-        """(text, tag) pieces for one course on the Unlocked page. Every stored requirement group
-        is listed in full and in order; this only changes presentation, not interpretation."""
+        """(text, tag) pieces for one course on the Unlocked page."""
         details = self.get_course_details(course) or {}
+        summary = self.summarize_unlocked_course(course, matching_groups, other_required_groups, target_course)
         segments = [(course, "unlocked_code")]
 
         if details.get("title"):
-            segments.append((f"   {details['title']}", "unlocked_title"))
+            segments.append((f" — {details['title']}", "unlocked_title"))
 
         segments.append(("\n", "unlocked_code"))
+        segments.append((f"{summary['role']}\n", "unlocked_line"))
 
-        for requirement in matching_groups:
-            if len(requirement["courses"]) == 1:
-                role = "is required"
-            else:
-                role = "is one of several options"
+        if summary["lines"]:
+            segments.append(("Other requirements:\n", "unlocked_line"))
+            segments.extend((f"• {line}\n", "unlocked_item") for line in summary["lines"])
+        else:
+            segments.append(("No other requirements listed.\n", "unlocked_line"))
 
-            segments.append((
-                f"{target_course} {role}: it {self.requirement_timing(requirement)}.\n",
-                "unlocked_line",
-            ))
-
-            if len(requirement["courses"]) > 1:
-                segments.append((f"{self.requirement_prefix(requirement)}:\n", "unlocked_req"))
-
-                for option in requirement["courses"]:
-                    marker = "   (searched course)" if option == target_course else ""
-                    segments.append((f"\u2022 {option}{marker}\n", "unlocked_item"))
-
-        if other_required_groups:
-            segments.append(("Additional requirements:\n", "unlocked_subhead"))
-
-            for requirement in other_required_groups:
-                segments.append((f"\u2022 {self.requirement_prefix(requirement)}:\n", "unlocked_req"))
-
-                for option in requirement["courses"]:
-                    segments.append((f"\u2013 {option}\n", "unlocked_item"))
-
-        notes = details.get("requirement_notes") or []
-
-        if notes:
-            segments.append(("Other conditions:\n", "unlocked_subhead"))
-            segments.extend((f"\u2022 {note}\n", "unlocked_req") for note in notes)
+        if summary["summarized"]:
+            segments.append(("See Prereqs for full requirements.\n", "unlocked_note"))
 
         return segments
 
@@ -1767,9 +1884,6 @@ class CoursePostRequisitesApp(tk.Tk):
         )
 
         for index, (course, matching_groups, other_required_groups) in enumerate(unlocked_courses):
-            if index:
-                self.unlocked_results.insert(tk.END, "\n")
-
             for text, tag in self.build_unlocked_course_segments(
                 course,
                 matching_groups,

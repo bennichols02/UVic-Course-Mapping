@@ -210,15 +210,14 @@ class GuiInterpretationTests(unittest.TestCase):
         unlocked = {course: (match, other) for course, match, other in self.app.get_unlocked_courses("STAT 260")}
         match, _other = unlocked["CSC 226"]
         text = self.app.format_unlocked_course_result("CSC 226", match, unlocked["CSC 226"][1], "STAT 260")
-        self.assertIn("STAT 260 is one of several options", text)
-        self.assertIn("taken at the same time (pre- or corequisite)", text)
-        self.assertIn("Completed or concurrently enrolled in 1 of:\n• GEOG 226\n", text)
-        self.assertIn("• STAT 260   (searched course)", text)
-        self.assertIn("Additional requirements:\n• Complete all of:\n– CSC 225", text)
+        self.assertIn("STAT 260 is one of the accepted options (can be taken at the same time).", text)
+        self.assertNotIn("GEOG 226", text)  # the searched course's alternatives are not expanded
+        self.assertIn("\u2022 CSC 225", text)
 
         unlocked = {course: (match, other) for course, match, other in self.app.get_unlocked_courses("CSC 225")}
         text = self.app.format_unlocked_course_result("CSC 226", *unlocked["CSC 226"], "CSC 225")
-        self.assertIn("CSC 225 is required: it must be completed beforehand (prerequisite)", text)
+        self.assertIn("CSC 225 is required.", text)
+        self.assertIn("(can be taken at the same time)", text)
 
     def test_targets_wording(self):
         self.app.completed_courses = ["CSC 225"]

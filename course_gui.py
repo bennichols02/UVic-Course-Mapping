@@ -57,6 +57,74 @@ FONT_SCALE = 1.45 if IS_MAC else 1.15
 
 def ui_font(size, *styles):
     return (UI_FONT_FAMILY, round(size * FONT_SCALE), *styles)
+
+
+# Matches course-like codes in any case, with or without a space: "csc110", "CSC 110", "Psyc100a".
+COURSE_ENTRY_PATTERN = re.compile(r"(?<![A-Za-z])([A-Za-z]{2,5})\s*(\d{3}[A-Za-z]?)(?![A-Za-z0-9])")
+COURSE_NOT_FOUND_MESSAGE = "Course not found in the current catalog. Please check the course code."
+ALL_SUBJECTS_LABEL = "All subjects"
+
+
+def parse_course_entries(text, known_courses):
+    """Split user input into catalog courses and rejected entries.
+
+    Entries are separated by commas, semicolons or new lines. Returns
+    (valid, rejected): valid holds normalized codes found in known_courses,
+    rejected holds the text the user typed for anything that isn't.
+    """
+    valid = []
+    rejected = []
+
+    for chunk in re.split(r"[,;\n]+", text):
+        chunk = " ".join(chunk.split())
+
+        if not chunk:
+            continue
+
+        matches = list(COURSE_ENTRY_PATTERN.finditer(chunk))
+
+        if not matches:
+            if chunk not in rejected:
+                rejected.append(chunk)
+            continue
+
+        for match in matches:
+            code = f"{match.group(1).upper()} {match.group(2).upper()}"
+
+            if code in known_courses:
+                if code not in valid:
+                    valid.append(code)
+            elif match.group(0) not in rejected:
+                rejected.append(match.group(0))
+
+    return valid, rejected
+
+
+def build_course_catalog(course_graph):
+    """Sorted (code, title) pairs for every course in the bundled database."""
+    return sorted(
+        (code, (details or {}).get("title", "") if isinstance(details, dict) else "")
+        for code, details in course_graph.get("courses", {}).items()
+    )
+
+
+def filter_course_catalog(catalog, query="", subject=""):
+    """Filter (code, title) pairs by a search query and an optional subject code."""
+    query = " ".join(query.lower().split())
+    compact_query = query.replace(" ", "")
+    subject = "" if subject == ALL_SUBJECTS_LABEL else subject
+    matches = []
+
+    for code, title in catalog:
+        if subject and code.split(" ")[0] != subject:
+            continue
+
+        if query and query not in title.lower() and compact_query not in code.lower().replace(" ", ""):
+            continue
+
+        matches.append((code, title))
+
+    return matches
 COURSE_CODE_PATTERN = re.compile(r"\b([A-Z]{2,5})\s*(\d{3}[A-Z]?)\b")
 UVIC_DARK_BLUE = "#002754"
 UVIC_BLUE = "#005493"
@@ -506,6 +574,7 @@ class CoursePostRequisitesApp(tk.Tk):
             ("Prereqs", self.show_course_prerequisites_page, "Info.TButton"),
             ("Targets", self.show_wanted_courses_page, "Personal.TButton"),
             ("Notes", self.show_notes_page, "Personal.TButton"),
+            ("Browse Courses", self.show_browse_courses_page, "Info.TButton"),
         )
 
         for index, (label, command, style) in enumerate(menu_items):
@@ -660,25 +729,52 @@ class CoursePostRequisitesApp(tk.Tk):
         for course in sorted(self.completed_courses):
             self.completed_course_list.insert(tk.END, course)
 
+    def known_course_codes(self):
+        return self.course_graph.get("courses", {})
+
+    def report_course_entry_results(self, added, already, rejected, already_label):
+        lines = []
+
+        if added:
+            lines.append(f"Added: {', '.join(added)}")
+
+        if already:
+            lines.append(f"{already_label}: {', '.join(already)}")
+
+        if rejected:
+            lines.append(
+                f"Not found in the current course database: {', '.join(rejected)}\n\n"
+                f"{COURSE_NOT_FOUND_MESSAGE}\n"
+                "(The database is a snapshot of the UVic calendar, so a missing course may still exist at UVic.)"
+            )
+            title = "Course Not Found" if not (added or already) else "Some Courses Not Found"
+            messagebox.showwarning(title, "\n\n".join(lines))
+        elif added:
+            messagebox.showinfo("Courses Added", "\n\n".join(lines))
+        else:
+            messagebox.showinfo("Already Added", "\n\n".join(lines))
+
     def add_completed_courses_from_input(self, event=None):
         text = self.completed_courses_text.get("1.0", tk.END)
-        courses = self.extract_course_codes(text)
+        courses, rejected = parse_course_entries(text, self.known_course_codes())
 
-        if not courses:
-            messagebox.showinfo("No Courses Found", "No course codes were found in that text.")
-            return
+        if not courses and not rejected:
+            messagebox.showinfo("No Courses Found", "Enter one or more course codes, such as CSC 110, MATH 100.")
+            return "break"
 
-        before_count = len(self.completed_courses)
-        self.completed_courses = sorted(set(self.completed_courses + courses))
-        added_count = len(self.completed_courses) - before_count
-        self.save_completed_courses()
+        added = [course for course in courses if course not in self.completed_courses]
+        already = [course for course in courses if course in self.completed_courses]
+
+        if added:
+            self.completed_courses = sorted(set(self.completed_courses + added))
+            self.save_completed_courses()
+            self.refresh_completed_course_list()
+
+        # Leave anything rejected in the box so it can be corrected.
         self.completed_courses_text.delete("1.0", tk.END)
-        self.refresh_completed_course_list()
-
-        if added_count:
-            messagebox.showinfo("Courses Added", f"Added {added_count} new courses.")
-        else:
-            messagebox.showinfo("Already Added", "Those courses are already in your plan.")
+        self.completed_courses_text.insert("1.0", ", ".join(rejected))
+        self.report_course_entry_results(added, already, rejected, "Already in your plan")
+        return "break"
 
     def remove_selected_completed_course(self):
         selected_indexes = self.completed_course_list.curselection()
@@ -970,6 +1066,140 @@ class CoursePostRequisitesApp(tk.Tk):
             self.check_course_prerequisites,
         )
 
+    def show_browse_courses_page(self):
+        self.clear_page()
+
+        if not hasattr(self, "course_catalog"):
+            self.course_catalog = build_course_catalog(self.course_graph)
+            self.browse_query = ""
+            self.browse_subject = ALL_SUBJECTS_LABEL
+            self.browse_selected_course = None
+
+        page = ttk.Frame(self.container, padding=28, style="Panel.TFrame")
+        page.grid(row=0, column=0, sticky="nsew")
+        page.columnconfigure(0, weight=1)
+        page.rowconfigure(3, weight=1)
+
+        self.create_page_header(page, "Browse Courses")
+
+        filter_row = ttk.Frame(page, style="Panel.TFrame")
+        filter_row.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        filter_row.columnconfigure(1, weight=1)
+
+        ttk.Label(filter_row, text="Search", style="Section.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8))
+
+        self.browse_search_var = tk.StringVar(value=self.browse_query)
+        search_entry = ttk.Entry(filter_row, textvariable=self.browse_search_var)
+        search_entry.grid(row=0, column=1, sticky="ew", padx=(0, 16))
+
+        ttk.Label(filter_row, text="Subject", style="Section.TLabel").grid(row=0, column=2, sticky="w", padx=(0, 8))
+
+        subjects = sorted({code.split(" ")[0] for code, _title in self.course_catalog})
+        self.browse_subject_var = tk.StringVar(value=self.browse_subject)
+        subject_combo = ttk.Combobox(
+            filter_row,
+            textvariable=self.browse_subject_var,
+            values=[ALL_SUBJECTS_LABEL] + subjects,
+            state="readonly",
+            width=14,
+        )
+        subject_combo.grid(row=0, column=3, sticky="e")
+
+        self.browse_count_label = ttk.Label(page, text="", style="Panel.TLabel")
+        self.browse_count_label.grid(row=2, column=0, sticky="w", pady=(0, 8))
+
+        body = ttk.Frame(page, style="Panel.TFrame")
+        body.grid(row=3, column=0, sticky="nsew")
+        body.columnconfigure(2, weight=1)
+        body.rowconfigure(0, weight=1)
+
+        self.browse_course_list = tk.Listbox(body, width=44, exportselection=False)
+        self.browse_course_list.grid(row=0, column=0, sticky="ns")
+        self.browse_course_list.bind("<<ListboxSelect>>", self.show_selected_browse_course)
+
+        list_scroll = ttk.Scrollbar(body, orient=tk.VERTICAL, command=self.browse_course_list.yview)
+        list_scroll.grid(row=0, column=1, sticky="ns", padx=(0, 16))
+        self.browse_course_list.configure(yscrollcommand=list_scroll.set)
+
+        result_frame = ttk.Frame(body, style="Panel.TFrame")
+        result_frame.grid(row=0, column=2, sticky="nsew")
+        result_frame.columnconfigure(0, weight=1)
+        result_frame.rowconfigure(0, weight=1)
+
+        self.browse_details = tk.Text(result_frame, wrap=tk.WORD, state=tk.DISABLED)
+        self.browse_details.grid(row=0, column=0, sticky="nsew")
+
+        details_scroll = ttk.Scrollbar(result_frame, orient=tk.VERTICAL, command=self.browse_details.yview)
+        details_scroll.grid(row=0, column=1, sticky="ns")
+        self.browse_details.configure(yscrollcommand=details_scroll.set)
+
+        self.browse_search_var.trace_add("write", self.refresh_browse_course_list)
+        subject_combo.bind("<<ComboboxSelected>>", self.refresh_browse_course_list)
+
+        self.refresh_browse_course_list()
+
+        if self.browse_selected_course:
+            self.display_browse_course(self.browse_selected_course)
+        else:
+            self.write_browse_details("Select a course to see its title, description, credits, and prerequisites.")
+
+        search_entry.focus_set()
+
+    def refresh_browse_course_list(self, *args):
+        self.browse_query = self.browse_search_var.get()
+        self.browse_subject = self.browse_subject_var.get()
+        self.browse_visible_courses = filter_course_catalog(
+            self.course_catalog,
+            self.browse_query,
+            self.browse_subject,
+        )
+
+        self.browse_course_list.delete(0, tk.END)
+
+        for code, title in self.browse_visible_courses:
+            self.browse_course_list.insert(tk.END, f"{code}  —  {title}" if title else code)
+
+        shown = len(self.browse_visible_courses)
+        total = len(self.course_catalog)
+        noun = "course" if shown == 1 else "courses"
+        self.browse_count_label.configure(
+            text=f"Showing all {total} courses" if shown == total else f"{shown} matching {noun} (of {total})"
+        )
+
+        visible_codes = [code for code, _title in self.browse_visible_courses]
+
+        if self.browse_selected_course in visible_codes:
+            index = visible_codes.index(self.browse_selected_course)
+            self.browse_course_list.selection_set(index)
+            self.browse_course_list.see(index)
+
+    def show_selected_browse_course(self, event=None):
+        selected = self.browse_course_list.curselection()
+
+        if not selected:
+            return
+
+        self.display_browse_course(self.browse_visible_courses[selected[0]][0])
+
+    def display_browse_course(self, course):
+        details = self.get_course_details(course)
+
+        if not details:
+            self.write_browse_details(f"{course}\n\n{COURSE_NOT_FOUND_MESSAGE}")
+            return
+
+        self.browse_selected_course = course
+        self.write_browse_details(
+            f"{self.format_course_information(course, details)}\n\n"
+            f"Prerequisites\n{self.format_prerequisites(details)}"
+        )
+
+    def write_browse_details(self, text):
+        self.browse_details.configure(state=tk.NORMAL)
+        self.browse_details.delete("1.0", tk.END)
+        self.browse_details.insert(tk.END, text)
+        self.browse_details.configure(state=tk.DISABLED)
+
     def write_course_lookup_result(self, summary, result):
         self.course_lookup_summary.configure(text=summary)
         self.course_lookup_results.configure(state=tk.NORMAL)
@@ -993,17 +1223,20 @@ class CoursePostRequisitesApp(tk.Tk):
             )
             return
 
+        result = self.format_course_information(course, details)
+        self.write_course_lookup_result(f"Showing information for {course}.", result)
+
+    def format_course_information(self, course, details):
         title = details.get("title") or "(No title stored yet)"
         description = details.get("description") or "(No description stored yet)"
         credits = details.get("credits") or "Not listed"
         hours = details.get("hours") or "Not listed"
-        result = (
+        return (
             f"{course}: {title}\n\n"
             f"Credits: {credits}\n"
             f"Hours: {hours}\n\n"
             f"{description}"
         )
-        self.write_course_lookup_result(f"Showing information for {course}.", result)
 
     def check_course_prerequisites(self, event=None):
         course = self.normalize_course_input(self.course_lookup_entry.get())
@@ -1182,17 +1415,32 @@ class CoursePostRequisitesApp(tk.Tk):
             self.wanted_course_list.insert(tk.END, course)
 
     def add_wanted_course(self, event=None):
-        course = self.normalize_course_input(self.wanted_course_entry.get())
+        courses, rejected = parse_course_entries(
+            self.wanted_course_entry.get(),
+            self.known_course_codes(),
+        )
 
-        if not course:
+        if not courses and not rejected:
             return
 
-        self.wanted_courses = sorted(set(self.wanted_courses + [course]))
-        self.save_wanted_courses()
+        added = [course for course in courses if course not in self.wanted_courses]
+        already = [course for course in courses if course in self.wanted_courses]
+
+        if added:
+            self.wanted_courses = sorted(set(self.wanted_courses + added))
+            self.save_wanted_courses()
+            self.refresh_wanted_course_list()
+
         self.wanted_course_entry.delete(0, tk.END)
-        self.refresh_wanted_course_list()
-        self.select_wanted_course(course)
-        self.display_wanted_course_details(course)
+        self.wanted_course_entry.insert(0, ", ".join(rejected))
+
+        if courses:
+            course = courses[-1]
+            self.select_wanted_course(course)
+            self.display_wanted_course_details(course)
+
+        if rejected:
+            self.report_course_entry_results(added, already, rejected, "Already in your targets")
 
     def remove_wanted_course(self):
         selected = self.wanted_course_list.curselection()

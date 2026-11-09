@@ -62,6 +62,9 @@ def ui_font(size, *styles):
 # Matches course-like codes in any case, with or without a space: "csc110", "CSC 110", "Psyc100a".
 COURSE_ENTRY_PATTERN = re.compile(r"(?<![A-Za-z])([A-Za-z]{2,5})\s*(\d{3}[A-Za-z]?)(?![A-Za-z0-9])")
 COURSE_NOT_FOUND_MESSAGE = "Course not found in the current catalog. Please check the course code."
+REQUIREMENT_PREREQUISITE = "prerequisite"
+REQUIREMENT_PRE_OR_COREQUISITE = "pre_or_corequisite"
+REQUIREMENT_COREQUISITE = "corequisite"
 ALL_SUBJECTS_LABEL = "All subjects"
 
 
@@ -855,16 +858,18 @@ class CoursePostRequisitesApp(tk.Tk):
         unlocked = []
 
         for course, details in sorted(courses.items()):
-            prereq_groups = details.get("prerequisite_groups", [])
+            requirements = self.get_requirement_groups(details)
             matching_groups = [
-                group for group in prereq_groups if target_course in group
+                requirement for requirement in requirements
+                if target_course in requirement["courses"]
             ]
 
             if not matching_groups:
                 continue
 
             other_required_groups = [
-                group for group in prereq_groups if target_course not in group
+                requirement for requirement in requirements
+                if target_course not in requirement["courses"]
             ]
             unlocked.append((course, matching_groups, other_required_groups))
 
@@ -873,17 +878,26 @@ class CoursePostRequisitesApp(tk.Tk):
     def format_unlocked_course_result(self, course, matching_groups, other_required_groups, target_course):
         lines = [course]
 
-        for group in matching_groups:
-            if len(group) == 1:
-                lines.append(f"  - {target_course} must be completed.")
+        for requirement in matching_groups:
+            group = requirement["courses"]
+
+            if requirement.get("category") == REQUIREMENT_COREQUISITE:
+                timing = "must be taken at the same time (corequisite)"
+            elif requirement.get("concurrent_allowed"):
+                timing = "can be completed beforehand or taken at the same time"
             else:
-                lines.append(f"  - {target_course} could be completed as one option.")
-                lines.append(f"    Complete 1 of: {', '.join(group)}")
+                timing = "must be completed beforehand"
+
+            if len(group) == 1:
+                lines.append(f"  - {target_course} is required: it {timing}.")
+            else:
+                lines.append(f"  - {target_course} is one option: it {timing}.")
+                lines.append(f"    {self.format_requirement(requirement)}")
 
         if other_required_groups:
             formatted_groups = [
-                self.format_requirement_group(group)
-                for group in other_required_groups
+                self.format_requirement(requirement)
+                for requirement in other_required_groups
             ]
             lines.append(f"  - Additional requirements: {'; '.join(formatted_groups)}")
 
@@ -898,44 +912,53 @@ class CoursePostRequisitesApp(tk.Tk):
     def get_course_details(self, course):
         return self.course_graph.get("courses", {}).get(course)
 
-    def get_prerequisite_groups(self, course_details):
+    def get_requirement_groups(self, course_details):
+        """Requirement groups as dicts: courses (any one satisfies the group), category, concurrent_allowed.
+
+        Uses the structured requirement_groups from course_graph.json. Older data without them
+        falls back to parsing the requirement text, which keeps "1 of" alternatives together
+        (never the flattened stored groups, which listed every alternative as mandatory).
+        """
         if not course_details:
             return []
 
-        stored_groups = course_details.get("prerequisite_groups", [])
+        if isinstance(course_details.get("requirement_groups"), list):
+            return [
+                {
+                    "courses": list(group.get("courses", [])),
+                    "category": group.get("category", REQUIREMENT_PREREQUISITE),
+                    "concurrent_allowed": bool(group.get("concurrent_allowed")),
+                }
+                for group in course_details["requirement_groups"]
+                if isinstance(group, dict) and group.get("courses")
+            ]
+
         parsed_groups = self.parse_prerequisite_text_groups(
-            course_details.get("prerequisite_text", "")
+            course_details.get("prerequisite_text", ""),
+            with_metadata=True,
         )
 
-        if not parsed_groups:
-            return stored_groups
-
-        stored_codes = {
-            course
-            for group in stored_groups
-            for course in group
-        }
-        parsed_codes = {
-            course
-            for group in parsed_groups
-            for course in group
-        }
-
-        if not stored_groups or not parsed_codes.issubset(stored_codes):
+        if parsed_groups:
             return parsed_groups
 
-        if len(parsed_groups) > len(stored_groups):
-            return parsed_groups
+        return [
+            {"courses": list(group), "category": REQUIREMENT_PREREQUISITE, "concurrent_allowed": False}
+            for group in course_details.get("prerequisite_groups", [])
+            if group
+        ]
 
-        return stored_groups
+    def get_prerequisite_groups(self, course_details):
+        return [group["courses"] for group in self.get_requirement_groups(course_details)]
 
-    def parse_prerequisite_text_groups(self, prerequisite_text):
+    def parse_prerequisite_text_groups(self, prerequisite_text, with_metadata=False):
         if not prerequisite_text:
             return []
 
         marker_pattern = re.compile(
             r"Completed or concurrently enrolled in all of:"
             r"|Completed or concurrently enrolled in 1 of:"
+            r"|Concurrently enrolled in 1 of:"
+            r"|Concurrently enrolled in:"
             r"|Complete all of:"
             r"|Complete 1 of:",
             re.IGNORECASE,
@@ -961,23 +984,53 @@ class CoursePostRequisitesApp(tk.Tk):
             if not courses:
                 continue
 
-            if "1 of" in marker:
-                groups.append(courses)
+            if marker.startswith("completed or concurrently"):
+                category, concurrent = REQUIREMENT_PRE_OR_COREQUISITE, True
+            elif marker.startswith("concurrently"):
+                category, concurrent = REQUIREMENT_COREQUISITE, True
             else:
-                groups.extend([course] for course in courses)
+                category, concurrent = REQUIREMENT_PREREQUISITE, False
+
+            if "1 of" in marker:
+                new_groups = [courses]
+            else:
+                new_groups = [[course] for course in courses]
+
+            for group in new_groups:
+                groups.append(
+                    {"courses": group, "category": category, "concurrent_allowed": concurrent}
+                    if with_metadata
+                    else group
+                )
 
         return groups
 
-    def format_prerequisites(self, course_details):
-        prereq_groups = self.get_prerequisite_groups(course_details)
+    def format_requirement(self, requirement):
+        courses = requirement["courses"]
+        category = requirement.get("category", REQUIREMENT_PREREQUISITE)
+        amount = "1 of" if len(courses) > 1 else "all of"
 
-        if not prereq_groups:
+        if category == REQUIREMENT_COREQUISITE:
+            prefix = "Concurrently enrolled in 1 of" if len(courses) > 1 else "Concurrently enrolled in"
+        elif requirement.get("concurrent_allowed"):
+            prefix = f"Completed or concurrently enrolled in {amount}"
+        else:
+            prefix = f"Complete {amount}"
+
+        return f"{prefix}: {', '.join(courses)}"
+
+    def format_prerequisites(self, course_details):
+        summary = (course_details or {}).get("requirement_summary")
+
+        if summary:
+            return summary
+
+        requirements = self.get_requirement_groups(course_details)
+
+        if not requirements:
             return "No prerequisites listed."
 
-        return "\n".join(
-            self.format_requirement_group(group)
-            for group in prereq_groups
-        )
+        return "\n".join(self.format_requirement(requirement) for requirement in requirements)
 
     def show_course_lookup_text_page(
         self,
@@ -1191,8 +1244,17 @@ class CoursePostRequisitesApp(tk.Tk):
         self.browse_selected_course = course
         self.write_browse_details(
             f"{self.format_course_information(course, details)}\n\n"
-            f"Prerequisites\n{self.format_prerequisites(details)}"
+            f"{self.format_browse_requirements(details)}"
         )
+
+    def format_browse_requirements(self, details):
+        text = self.format_prerequisites(details)
+
+        # The calendar-style summary already starts with its own section heading.
+        if text.endswith(":") or text.split("\n", 1)[0].endswith(":"):
+            return text
+
+        return f"Prerequisites\n{text}"
 
     def write_browse_details(self, text):
         self.browse_details.configure(state=tk.NORMAL)
@@ -1488,13 +1550,18 @@ class CoursePostRequisitesApp(tk.Tk):
         completed = set(self.completed_courses)
         missing_lines = []
 
-        for group in self.get_prerequisite_groups(details):
-            completed_options = [option for option in group if option in completed]
+        for requirement in self.get_requirement_groups(details):
+            completed_options = [option for option in requirement["courses"] if option in completed]
 
             if completed_options:
-                missing_lines.append(f"Met: {self.format_requirement_group(group)}")
+                missing_lines.append(f"Met: {self.format_requirement(requirement)}")
+            elif requirement.get("concurrent_allowed"):
+                missing_lines.append(f"Needed (can be taken at the same time): {self.format_requirement(requirement)}")
             else:
-                missing_lines.append(f"Needed: {self.format_requirement_group(group)}")
+                missing_lines.append(f"Needed: {self.format_requirement(requirement)}")
+
+        if details.get("requirement_notes"):
+            missing_lines.extend(f"Also: {note}" for note in details["requirement_notes"])
 
         if not missing_lines:
             missing_lines.append("No prerequisites listed.")
@@ -1516,7 +1583,21 @@ class CoursePostRequisitesApp(tk.Tk):
 
         title = details.get("title") or ""
         can_take = self.course_is_available(course, completed)
-        status = "You can register based on saved completed courses." if can_take else "You still have unmet prerequisites."
+        concurrent_pending = [
+            requirement for requirement in self.get_requirement_groups(details)
+            if requirement.get("concurrent_allowed")
+            and not any(option in completed for option in requirement["courses"])
+        ]
+
+        if can_take and concurrent_pending:
+            status = (
+                "You can register if you also take these in the same term (or have already): "
+                + "; ".join(self.format_requirement(requirement) for requirement in concurrent_pending)
+            )
+        elif can_take:
+            status = "You can register based on saved completed courses."
+        else:
+            status = "You still have unmet prerequisites."
         result = f"{course}: {title}\n\n{status}\n\nDirect requirements:\n" + "\n".join(missing_lines)
         result += "\n\nAll possible prerequisite courses still in the path:\n" + possible_text
         result += "\n\nPrerequisite path details:\n" + path_text
@@ -1535,9 +1616,9 @@ class CoursePostRequisitesApp(tk.Tk):
         if not details:
             return [f"{'  ' * depth}- {course}: details not found in loaded graph."], set()
 
-        groups = self.get_prerequisite_groups(details)
+        requirements = self.get_requirement_groups(details)
 
-        if not groups:
+        if not requirements:
             return [], set()
 
         visiting.add(course)
@@ -1545,7 +1626,9 @@ class CoursePostRequisitesApp(tk.Tk):
         possible_needed = set()
         indent = "  " * depth
 
-        for group in groups:
+        for requirement in requirements:
+            group = requirement["courses"]
+            timing = " (or take it at the same time)" if requirement.get("concurrent_allowed") else ""
             completed_options = [option for option in group if option in completed]
 
             if completed_options:
@@ -1556,7 +1639,7 @@ class CoursePostRequisitesApp(tk.Tk):
 
             if len(group) == 1:
                 prereq = group[0]
-                lines.append(f"{indent}- {course}: need {prereq}")
+                lines.append(f"{indent}- {course}: need {prereq}{timing}")
 
                 if prereq not in completed:
                     possible_needed.add(prereq)
@@ -1572,7 +1655,7 @@ class CoursePostRequisitesApp(tk.Tk):
             else:
                 available_options = [option for option in group if option not in completed]
                 lines.append(
-                    f"{indent}- {course}: need 1 of {', '.join(group)}"
+                    f"{indent}- {course}: need 1 of {', '.join(group)}{timing}"
                 )
 
                 for option in available_options:
@@ -1861,12 +1944,37 @@ class CoursePostRequisitesApp(tk.Tk):
         if not details:
             return False
 
-        prereq_groups = self.get_prerequisite_groups(details)
-
         return all(
-            any(option in completed_courses for option in group)
-            for group in prereq_groups
+            self.requirement_is_satisfied(requirement, completed_courses)
+            for requirement in self.get_requirement_groups(details)
         )
+
+    def requirement_is_satisfied(self, requirement, completed_courses, allow_concurrent=True):
+        """A group is met by a completed option. Groups that allow concurrent enrollment are
+        also met when an option could be taken in the same term (its own completed-before
+        requirements are met), so they never wrongly demand prior completion."""
+        options = requirement["courses"]
+
+        if any(option in completed_courses for option in options):
+            return True
+
+        if not (allow_concurrent and requirement.get("concurrent_allowed")):
+            return False
+
+        for option in options:
+            option_details = self.get_course_details(option)
+
+            if option_details is None:
+                continue
+
+            if all(
+                self.requirement_is_satisfied(option_requirement, completed_courses, allow_concurrent=False)
+                for option_requirement in self.get_requirement_groups(option_details)
+                if not option_requirement.get("concurrent_allowed")
+            ):
+                return True
+
+        return False
 
     def get_courses_unlocked_by_completed(self, completed_courses):
         unlocked = []

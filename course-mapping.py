@@ -33,10 +33,20 @@ def load_courses():
 
 
 def get_prereq_groups(course_details):
-    if isinstance(course_details, dict):
-        return course_details.get("prerequisite_groups", [])
+    return [group["courses"] for group in get_requirement_groups(course_details)]
 
-    return course_details
+
+def get_requirement_groups(course_details):
+    if not isinstance(course_details, dict):
+        return [{"courses": group, "concurrent_allowed": False, "category": "prerequisite"} for group in course_details]
+
+    if isinstance(course_details.get("requirement_groups"), list):
+        return [group for group in course_details["requirement_groups"] if group.get("courses")]
+
+    return [
+        {"courses": group, "concurrent_allowed": False, "category": "prerequisite"}
+        for group in course_details.get("prerequisite_groups", [])
+    ]
 
 
 def format_complete_group(group):
@@ -57,16 +67,16 @@ def print_unlocked_courses(target_course, courses):
     unlocked_courses = []
 
     for course, details in sorted(courses.items()):
-        prereq_groups = get_prereq_groups(details)
+        requirements = get_requirement_groups(details)
         matching_groups = [
-            group for group in prereq_groups if target_course in group
+            requirement for requirement in requirements if target_course in requirement["courses"]
         ]
 
         if not matching_groups:
             continue
 
         other_required_groups = [
-            group for group in prereq_groups if target_course not in group
+            requirement["courses"] for requirement in requirements if target_course not in requirement["courses"]
         ]
 
         unlocked_courses.append((course, matching_groups, other_required_groups))
@@ -82,13 +92,21 @@ def print_unlocked_courses(target_course, courses):
     for course, matching_groups, other_required_groups in unlocked_courses:
         print(f"\n{course}")
 
-        for group in matching_groups:
-            if len(group) == 1:
-                print(f"  - {target_course} must be completed.")
+        for requirement in matching_groups:
+            group = requirement["courses"]
+
+            if requirement.get("category") == "corequisite":
+                timing = "must be taken at the same time (corequisite)"
+            elif requirement.get("concurrent_allowed"):
+                timing = "can be completed beforehand or taken at the same time"
             else:
-                alternatives = ", ".join(group)
-                print(f"  - {target_course} could be completed as one option.")
-                print(f"    Complete 1 of: {alternatives}")
+                timing = "must be completed beforehand"
+
+            if len(group) == 1:
+                print(f"  - {target_course} is required: it {timing}.")
+            else:
+                print(f"  - {target_course} is one option: it {timing}.")
+                print(f"    1 of: {', '.join(group)}")
 
         if other_required_groups:
             print(f"  - Additional requirements: {format_requirements(other_required_groups)}")

@@ -798,7 +798,7 @@ class CoursePostRequisitesApp(tk.Tk):
         page = ttk.Frame(self.container, padding=28, style="Panel.TFrame")
         page.grid(row=0, column=0, sticky="nsew")
         page.columnconfigure(0, weight=1)
-        page.rowconfigure(4, weight=1)
+        page.rowconfigure(3, weight=1)
 
         self.create_page_header(page, "Unlocked/Post-requisites")
 
@@ -844,6 +844,7 @@ class CoursePostRequisitesApp(tk.Tk):
             state=tk.DISABLED,
         )
         self.unlocked_results.grid(row=0, column=0, sticky="nsew")
+        self.configure_unlocked_result_tags()
 
         scrollbar = ttk.Scrollbar(
             result_frame,
@@ -852,6 +853,15 @@ class CoursePostRequisitesApp(tk.Tk):
         )
         scrollbar.grid(row=0, column=1, sticky="ns")
         self.unlocked_results.configure(yscrollcommand=scrollbar.set)
+
+    def configure_unlocked_result_tags(self):
+        text = self.unlocked_results
+        text.tag_configure("unlocked_code", font=ui_font(13, "bold"), foreground=UVIC_DARK_BLUE, spacing1=14)
+        text.tag_configure("unlocked_title", font=ui_font(12), foreground=UVIC_BLUE)
+        text.tag_configure("unlocked_line", lmargin1=16, lmargin2=16, spacing1=6)
+        text.tag_configure("unlocked_subhead", font=ui_font(11, "bold"), lmargin1=16, lmargin2=16, spacing1=8)
+        text.tag_configure("unlocked_req", lmargin1=32, lmargin2=44)
+        text.tag_configure("unlocked_item", lmargin1=52, lmargin2=64)
 
     def get_unlocked_courses(self, target_course):
         courses = self.course_graph.get("courses", {})
@@ -875,33 +885,66 @@ class CoursePostRequisitesApp(tk.Tk):
 
         return unlocked
 
-    def format_unlocked_course_result(self, course, matching_groups, other_required_groups, target_course):
-        lines = [course]
+    def requirement_timing(self, requirement):
+        if requirement.get("category") == REQUIREMENT_COREQUISITE:
+            return "must be taken at the same time (corequisite)"
+
+        if requirement.get("concurrent_allowed"):
+            return "can be completed beforehand or taken at the same time (pre- or corequisite)"
+
+        return "must be completed beforehand (prerequisite)"
+
+    def build_unlocked_course_segments(self, course, matching_groups, other_required_groups, target_course):
+        """(text, tag) pieces for one course on the Unlocked page. Every stored requirement group
+        is listed in full and in order; this only changes presentation, not interpretation."""
+        details = self.get_course_details(course) or {}
+        segments = [(course, "unlocked_code")]
+
+        if details.get("title"):
+            segments.append((f"   {details['title']}", "unlocked_title"))
+
+        segments.append(("\n", "unlocked_code"))
 
         for requirement in matching_groups:
-            group = requirement["courses"]
-
-            if requirement.get("category") == REQUIREMENT_COREQUISITE:
-                timing = "must be taken at the same time (corequisite)"
-            elif requirement.get("concurrent_allowed"):
-                timing = "can be completed beforehand or taken at the same time"
+            if len(requirement["courses"]) == 1:
+                role = "is required"
             else:
-                timing = "must be completed beforehand"
+                role = "is one of several options"
 
-            if len(group) == 1:
-                lines.append(f"  - {target_course} is required: it {timing}.")
-            else:
-                lines.append(f"  - {target_course} is one option: it {timing}.")
-                lines.append(f"    {self.format_requirement(requirement)}")
+            segments.append((
+                f"{target_course} {role}: it {self.requirement_timing(requirement)}.\n",
+                "unlocked_line",
+            ))
+
+            if len(requirement["courses"]) > 1:
+                segments.append((f"{self.requirement_prefix(requirement)}:\n", "unlocked_req"))
+
+                for option in requirement["courses"]:
+                    marker = "   (searched course)" if option == target_course else ""
+                    segments.append((f"\u2022 {option}{marker}\n", "unlocked_item"))
 
         if other_required_groups:
-            formatted_groups = [
-                self.format_requirement(requirement)
-                for requirement in other_required_groups
-            ]
-            lines.append(f"  - Additional requirements: {'; '.join(formatted_groups)}")
+            segments.append(("Additional requirements:\n", "unlocked_subhead"))
 
-        return "\n".join(lines)
+            for requirement in other_required_groups:
+                segments.append((f"\u2022 {self.requirement_prefix(requirement)}:\n", "unlocked_req"))
+
+                for option in requirement["courses"]:
+                    segments.append((f"\u2013 {option}\n", "unlocked_item"))
+
+        notes = details.get("requirement_notes") or []
+
+        if notes:
+            segments.append(("Other conditions:\n", "unlocked_subhead"))
+            segments.extend((f"\u2022 {note}\n", "unlocked_req") for note in notes)
+
+        return segments
+
+    def format_unlocked_course_result(self, course, matching_groups, other_required_groups, target_course):
+        segments = self.build_unlocked_course_segments(
+            course, matching_groups, other_required_groups, target_course
+        )
+        return "".join(text for text, _tag in segments).rstrip("\n")
 
     def format_requirement_group(self, group):
         if len(group) > 1:
@@ -1005,19 +1048,21 @@ class CoursePostRequisitesApp(tk.Tk):
 
         return groups
 
-    def format_requirement(self, requirement):
+    def requirement_prefix(self, requirement):
         courses = requirement["courses"]
         category = requirement.get("category", REQUIREMENT_PREREQUISITE)
         amount = "1 of" if len(courses) > 1 else "all of"
 
         if category == REQUIREMENT_COREQUISITE:
-            prefix = "Concurrently enrolled in 1 of" if len(courses) > 1 else "Concurrently enrolled in"
-        elif requirement.get("concurrent_allowed"):
-            prefix = f"Completed or concurrently enrolled in {amount}"
-        else:
-            prefix = f"Complete {amount}"
+            return "Concurrently enrolled in 1 of" if len(courses) > 1 else "Concurrently enrolled in"
 
-        return f"{prefix}: {', '.join(courses)}"
+        if requirement.get("concurrent_allowed"):
+            return f"Completed or concurrently enrolled in {amount}"
+
+        return f"Complete {amount}"
+
+    def format_requirement(self, requirement):
+        return f"{self.requirement_prefix(requirement)}: {', '.join(requirement['courses'])}"
 
     def format_prerequisites(self, course_details):
         summary = (course_details or {}).get("requirement_summary")
@@ -1721,17 +1766,20 @@ class CoursePostRequisitesApp(tk.Tk):
             text=f"{len(unlocked_courses)} loaded courses list {target_course} as a prerequisite."
         )
 
-        result_text = "\n\n".join(
-            self.format_unlocked_course_result(
+        for index, (course, matching_groups, other_required_groups) in enumerate(unlocked_courses):
+            if index:
+                self.unlocked_results.insert(tk.END, "\n")
+
+            for text, tag in self.build_unlocked_course_segments(
                 course,
                 matching_groups,
                 other_required_groups,
                 target_course,
-            )
-            for course, matching_groups, other_required_groups in unlocked_courses
-        )
-        self.unlocked_results.insert(tk.END, result_text)
+            ):
+                self.unlocked_results.insert(tk.END, text, tag)
+
         self.unlocked_results.configure(state=tk.DISABLED)
+        self.unlocked_results.yview_moveto(0)
 
     def show_flowchart_page(self):
         self.clear_page()

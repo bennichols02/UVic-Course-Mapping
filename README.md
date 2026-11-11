@@ -8,6 +8,22 @@
   Plan your UVic degree: see which courses you've unlocked, what you still need, and a flowchart of how it all connects.
 </p>
 
+## Some important points to note (PLEASE READ BEFORE CONTINUING)
+
+1. This is an unofficial tool which I am still developing, please tell me if you find any bugs, if the software isn't running for you, or if there is any improvements you would like to see. Some features, especially the flowcharts, may not always display perfectly. I'm actively looking into improving their readability and functionality while keeping the application simple to use.
+
+2. This software is intended to help with course planning, it cannot replace academic advising. Although it includes course information and prerequisite relationships from UVic's academic calendar, I can't guarantee that everything is completely accurate or up to date. Always double-check course requirements with the official UVic Academic Calendar before making academic decisions.
+
+3. Your course information stays on your computer. You can track courses you've completed, courses you're interested in taking, and personal notes. The application doesn't require you to sign into your UVic account or provide your student information.
+
+4. Installation instructions are available on GitHub. Please follow the README for instructions on downloading and running the application. If something doesn't work, let me know what operating system you're using and what happened.
+
+5. There is a tool I originally built into the app which scrapes the course website to return the most up to date information. While this would be useful, I felt that requesting ~3700 course pages puts a lot of strain on the UVic website and having multiple people running this command wouldn't be smart. If I can speak to UVic about possibly integrating this or attaching it to an API, I may be able to add this feature back. For now I've included a scrape I did on November 7th 2026 to the github repository.
+
+6. I understand that some people have some hesitations about AI usage so to be clear, this app was built with help from Claude and ChatGPT.
+
+7. On macs it is not officially recognized by apple as safe, it will warn you that the application cannot be scanned for malware and it recommends not opening it. There is a way to bypass this however I wouldn't be trusting of someone on the internet telling you to bypass security features built into your computer. If you would still like to use this application knowing this, instructions for how to bypass it are located in the readme document on github.
+
 ## Quick start
 
 ### 1. Download
